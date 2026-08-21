@@ -101,13 +101,19 @@ if "custom_portfolios" not in st.session_state:
     }
 
 # -------------------------------------------------------------
-# 4. 데이터 로드 함수 (캐싱)
+# 4. 데이터 로드 함수 (캐싱 & 인덱스 에러 방지 처리)
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600)
-def load_historical_data(tickers, period="1y"):
+def load_historical_data(ticker, period="1y"):
     try:
-        data = yf.download(tickers, period=period, group_by='ticker', auto_adjust=True, progress=False)
-        return data
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period)
+        if df.empty:
+            return None
+        df = df.reset_index()
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+        return df[['Date', 'Close']]
     except Exception:
         return None
 
@@ -136,7 +142,7 @@ total_monthly_expense = monthly_fixed_cost + exp_op + exp_div
 annual_expense = total_monthly_expense * 12
 
 # -------------------------------------------------------------
-# 6. 메인 헤더
+# 6. 메인 화면 헤더
 # -------------------------------------------------------------
 st.title("SignalC 법인 포트폴리오")
 st.caption("실제 상장 ETF 기반 법인 배당 매출 시뮬레이터 및 투자 성향 진단 시스템")
@@ -153,7 +159,6 @@ with main_tab1:
     # 4개 모델 비교 카드
     summary_cols = st.columns(4)
     for idx, (p_name, p_info) in enumerate(STANDARD_PORTFOLIOS.items()):
-        # 가중평균 배당수익률 계산
         avg_yield = sum(MASTER_ASSETS[t]["yield"] * (w / 100) for t, w in p_info["weights"].items())
         annual_rev = total_capital * (avg_yield / 100)
         monthly_rev = annual_rev / 12
@@ -167,7 +172,6 @@ with main_tab1:
             st.metric("월 예상 배당매출", f"{monthly_rev / 10000:,.0f} 만원")
             st.metric("월 순이익(잉여)", f"{net_monthly / 10000:,.0f} 만원", delta=f"커버리지 {coverage:.1f}%")
             
-            # 비중 간략 표시
             weight_text = " / ".join([f"{t} {w}%" for t, w in p_info["weights"].items()])
             st.caption(f"구성: {weight_text}")
 
@@ -234,22 +238,22 @@ with main_tab1:
     with chart_col2:
         hist_data = load_historical_data(selected_ticker, period=selected_period)
         if hist_data is not None and not hist_data.empty:
-            df_plot = hist_data.reset_index()
-            # yfinance 다중 인덱스 처리
-            if ('Close', selected_ticker) in df_plot.columns:
-                close_col = ('Close', selected_ticker)
-            else:
-                close_col = 'Close'
-            
-            fig_hist = px.line(df_plot, x='Date', y=close_col, title=f"{selected_ticker} 주가 추이 ({selected_period})")
+            fig_hist = px.line(
+                hist_data,
+                x='Date',
+                y='Close',
+                title=f"{selected_ticker} 주가 추이 ({selected_period})",
+                labels={'Close': '주가 ($)', 'Date': '날짜'}
+            )
+            fig_hist.update_traces(hovertemplate='%{x|%Y-%m-%d}<br>종가: $%{y:.2f}')
+            fig_hist.update_layout(xaxis_title="", yaxis_title="주가 (USD)")
             st.plotly_chart(fig_hist, use_container_width=True)
         else:
-            st.info("데이터를 불러오는 중이거나 종목 시세를 일시적으로 가져올 수 없습니다.")
+            st.warning("데이터를 불러오는 중이거나 종목 시세를 가져올 수 없습니다.")
 
 # -------------------------------------------------------------
 # TAB 2: 커스텀 포트폴리오 (진단 & 시뮬레이션)
 # -------------------------------------------------------------
-# 모달 다이얼로그 정의 (Streamlit 1.33+ st.dialog 지원)
 @st.dialog("🛠️ 커스텀 포트폴리오 생성/수정")
 def custom_portfolio_dialog():
     p_name_input = st.text_input("포트폴리오 명칭", value="내 맞춤 포트폴리오")
@@ -297,16 +301,12 @@ with main_tab2:
 
         # 투자 성향 자동 판정 로직
         if c_avg_yield < 6.5:
-            diagnosed_type = "안정형 (Stability)"
             type_badge = "🛡️ 안정형 성향"
         elif c_avg_yield < 8.5:
-            diagnosed_type = "중립형 (Balanced)"
             type_badge = "⚖️ 중립형 성향"
         elif c_avg_yield < 10.5:
-            diagnosed_type = "투자형 (Growth Income)"
             type_badge = "🚀 투자형 성향"
         else:
-            diagnosed_type = "공격형 (Aggressive Income)"
             type_badge = "🔥 공격형 성향"
 
         st.markdown("---")
