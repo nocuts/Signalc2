@@ -140,22 +140,18 @@ def show_portfolio_report(p_name, p_info, prices):
     st.markdown(f"### **[{p_name}] 중장기 성과 리포트**")
     st.caption(f"전략 목표: {p_info['desc']} (목표 배당률: {p_info['target_yield_range']})")
     
-    # 1년 합성 일별 시계열 생성
     valid_tickers = [t for t in p_info["weights"] if t in prices and len(prices[t]) > 0]
     if len(valid_tickers) == len(p_info["weights"]):
-        # 공통 일자 인덱스
         common_idx = prices[valid_tickers[0]].index
         for t in valid_tickers[1:]:
             common_idx = common_idx.intersection(prices[t].index)
         common_idx = sorted(common_idx)
         
-        # 일별 합성 수익률 시리즈 (시작일 = 100 기준)
         daily_norm = pd.Series(0.0, index=common_idx)
         for t, w in p_info["weights"].items():
             s = prices[t].reindex(common_idx).ffill().bfill()
             daily_norm += (s / s.iloc[0]) * (w / 100)
         
-        # 3개월, 6개월, 1년 기간 수익률 계산
         tot_days = len(daily_norm)
         ret_1y = ((daily_norm.iloc[-1] / daily_norm.iloc[0]) - 1.0) * 100 if tot_days > 0 else 0
         
@@ -165,7 +161,6 @@ def show_portfolio_report(p_name, p_info, prices):
         idx_3m = max(0, tot_days - 63)
         ret_3m = ((daily_norm.iloc[-1] / daily_norm.iloc[idx_3m]) - 1.0) * 100 if tot_days > 0 else 0
 
-        # 요약 메트릭
         m1, m2, m3 = st.columns(3)
         m1.metric("최근 3개월 누적 수익률", f"{ret_3m:+.2f}%")
         m2.metric("최근 6개월 누적 수익률", f"{ret_6m:+.2f}%")
@@ -174,9 +169,8 @@ def show_portfolio_report(p_name, p_info, prices):
         st.markdown("---")
         st.markdown("#### 📅 월별 수익률 히스토리")
         
-        # 월별 수익률 집계
         daily_df = pd.DataFrame({'value': daily_norm})
-        monthly_resample = daily_df.resample('M').last()
+        monthly_resample = daily_df.resample('ME').last() if hasattr(pd, 'Grouper') else daily_df.resample('M').last()
         monthly_rets = monthly_resample.pct_change().dropna() * 100
         
         month_rows = []
@@ -191,8 +185,7 @@ def show_portfolio_report(p_name, p_info, prices):
         
         st.dataframe(pd.DataFrame(month_rows).iloc[::-1], hide_index=True, use_container_width=True)
         
-        # 1년 자산 추이 차트
-        st.markdown("#### 📈 최근 1년 자산 가치 성장 추이 (기준지수 100)")
+        st.markdown("#### 📈 최근 1년 자산 가치 성장 추이 (기준지수 1.0)")
         fig_rep = px.line(daily_df, x=daily_df.index, y='value', labels={'value': '자산 지수 (시작=1.0)', 'index': '날짜'})
         fig_rep.update_traces(line_color="#1E3A8A", hovertemplate="%{x|%Y-%m-%d}: 지수 %{y:.3f}")
         fig_rep.update_layout(height=280, margin=dict(l=5, r=5, t=10, b=5))
@@ -217,7 +210,6 @@ main_tab1, main_tab2 = st.tabs(["🏛️ 기본 포트폴리오 (4개 표준 모
 
 prices = load_all_prices()
 
-# 최신 날짜 파악
 if prices:
     all_dates = pd.concat([pd.Series(s.index) for s in prices.values() if not s.empty])
     latest_dt = all_dates.max() if not all_dates.empty else datetime.today()
@@ -259,7 +251,6 @@ with main_tab1:
     target_end_of_month = datetime(sel_year, sel_month, last_day_num)
     target_prev_month_end = target_start_of_month - pd.Timedelta(days=1)
 
-    # 1. 4개 모델 당월 수익률 사전 계산 (BEST 1위 식별용)
     perf_records = {}
     calculated_data = {}
 
@@ -284,7 +275,7 @@ with main_tab1:
                     prev_val = float(prev_close.iloc[-1]) if not prev_close.empty else float(s.iloc[0])
                     
                     s_in_m = s[(s.index >= target_start_of_month) & (s.index <= target_end_of_month)]
-                    curr_val = float(s_in_month.iloc[-1]) if not s_in_m.empty else prev_val
+                    curr_val = float(s_in_m.iloc[-1]) if not s_in_m.empty else prev_val
                     
                     chg_pct = ((curr_val - prev_val) / prev_val) * 100 if prev_val != 0 else 0.0
                     item_changes[t] = chg_pct
@@ -306,7 +297,6 @@ with main_tab1:
 
     best_portfolio = max(perf_records, key=perf_records.get) if perf_records else None
 
-    # 2. 2x2 그리드 카드 렌더링
     grid_row1_col1, grid_row1_col2 = st.columns(2)
     grid_row2_col1, grid_row2_col2 = st.columns(2)
     grid_cells = [grid_row1_col1, grid_row1_col2, grid_row2_col1, grid_row2_col2]
@@ -330,7 +320,6 @@ with main_tab1:
                         symbol = "-"
                         color_style = "color:#4B5563;"
 
-                    # 헤더: 뱃지 및 리포트 팝업 버튼 배치
                     h_col1, h_col2 = st.columns([3, 2])
                     with h_col1:
                         if p_name == best_portfolio and current_perf_pct > 0:
@@ -343,11 +332,9 @@ with main_tab1:
                         st.caption(f"목표 배당률: {p_info['target_yield_range']}")
 
                     with h_col2:
-                        # 리포트 팝업 트리거 버튼
                         if st.button(f"📊 {p_name} 리포트", key=f"btn_rep_{p_name}", use_container_width=True):
                             show_portfolio_report(p_name, p_info, prices)
 
-                    # 수익률 메트릭
                     st.markdown(f"""
                     <div style='margin: 6px 0;'>
                         <span style='font-size:13px; color:#555;'>전월 대비 수익률:</span> 
@@ -356,7 +343,6 @@ with main_tab1:
                     </div>
                     """, unsafe_allow_html=True)
 
-                    # 다중 라인 차트
                     fig = go.Figure()
                     fig.add_hline(y=0, line_dash="dot", line_color="#D1D5DB", line_width=1)
 
@@ -411,7 +397,6 @@ with main_tab1:
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # 하단 개별 종목 등락 배지
                     badge_htmls = []
                     for t, chg in cdata["item_changes"].items():
                         sym = "▲" if chg > 0 else ("▼" if chg < 0 else "-")
