@@ -101,7 +101,7 @@ if "custom_portfolios" not in st.session_state:
     }
 
 # -------------------------------------------------------------
-# 4. 데이터 로드 함수 (캐싱 & 인덱스 에러 방지 처리)
+# 4. 데이터 로드 함수 (캐싱 & 타임존 정제)
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_data(ticker, period="1y"):
@@ -142,7 +142,7 @@ total_monthly_expense = monthly_fixed_cost + exp_op + exp_div
 annual_expense = total_monthly_expense * 12
 
 # -------------------------------------------------------------
-# 6. 메인 화면 헤더
+# 6. 메인 헤더
 # -------------------------------------------------------------
 st.title("SignalC 법인 포트폴리오")
 st.caption("실제 상장 ETF 기반 법인 배당 매출 시뮬레이터 및 투자 성향 진단 시스템")
@@ -156,7 +156,7 @@ main_tab1, main_tab2 = st.tabs(["🏛️ 기본 포트폴리오 (4개 표준 모
 with main_tab1:
     st.subheader("1. 4개 표준 모델 통합 비교")
     
-    # 4개 모델 비교 카드
+    # 4개 모델 비교 카드 (카드형 UI 개선 적용)
     summary_cols = st.columns(4)
     for idx, (p_name, p_info) in enumerate(STANDARD_PORTFOLIOS.items()):
         avg_yield = sum(MASTER_ASSETS[t]["yield"] * (w / 100) for t, w in p_info["weights"].items())
@@ -166,14 +166,51 @@ with main_tab1:
         coverage = (monthly_rev / total_monthly_expense * 100) if total_monthly_expense > 0 else 100
 
         with summary_cols[idx]:
-            st.markdown(f"### **{p_name}**")
-            st.caption(f"목표: {p_info['target_yield_range']}")
-            st.metric("예상 연 배당수익률", f"{avg_yield:.2f}%")
-            st.metric("월 예상 배당매출", f"{monthly_rev / 10000:,.0f} 만원")
-            st.metric("월 순이익(잉여)", f"{net_monthly / 10000:,.0f} 만원", delta=f"커버리지 {coverage:.1f}%")
-            
-            weight_text = " / ".join([f"{t} {w}%" for t, w in p_info["weights"].items()])
-            st.caption(f"구성: {weight_text}")
+            with st.container(border=True):
+                # 헤더
+                st.markdown(f"<h4 style='margin:0; padding:0; text-align:center;'>{p_name}</h4>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color:gray; font-size:12px; text-align:center; margin-bottom:12px;'>목표: {p_info['target_yield_range']}</p>", unsafe_allow_html=True)
+                
+                # 예상 연 배당수익률
+                st.markdown(f"""
+                <div style='background-color:#F8F9FA; border-radius:8px; padding:10px; text-align:center; margin-bottom:10px;'>
+                    <span style='font-size:12px; color:#555;'>예상 연 배당수익률</span><br>
+                    <span style='font-size:22px; font-weight:bold; color:#1E3A8A;'>{avg_yield:.2f}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 월 예상 배당 매출
+                st.markdown(f"""
+                <div style='text-align:center; margin-bottom:12px;'>
+                    <span style='font-size:12px; color:#666;'>월 예상 배당매출</span><br>
+                    <span style='font-size:24px; font-weight:800; color:#0F172A;'>{monthly_rev / 10000:,.0f} <span style='font-size:15px; font-weight:normal;'>만원</span></span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 월 순이익 & 커버리지 상태
+                net_color = "#16A34A" if net_monthly >= 0 else "#DC2626"
+                badge_bg = "#DCFCE7" if net_monthly >= 0 else "#FEE2E2"
+                badge_text_color = "#15803D" if net_monthly >= 0 else "#B91C1C"
+                prefix = "+" if net_monthly > 0 else ""
+
+                st.markdown(f"""
+                <div style='border-top:1px solid #E2E8F0; padding-top:10px; margin-bottom:12px; text-align:center;'>
+                    <span style='font-size:12px; color:#666;'>월 잉여금 (손익)</span><br>
+                    <span style='font-size:18px; font-weight:bold; color:{net_color};'>{prefix}{net_monthly / 10000:,.0f} 만원</span>
+                    <div style='margin-top:4px;'>
+                        <span style='background-color:{badge_bg}; color:{badge_text_color}; font-size:11px; font-weight:600; padding:2px 8px; border-radius:12px;'>
+                            지출 커버 {coverage:.1f}%
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # 종목 구성 비중
+                weight_badges = " ".join([
+                    f"<span style='background-color:#EDE9FE; color:#5B21B6; font-size:10px; padding:2px 6px; border-radius:4px; margin:2px;'>{t} {w}%</span>" 
+                    for t, w in p_info["weights"].items()
+                ])
+                st.markdown(f"<div style='line-height:1.8; text-align:center;'>{weight_badges}</div>", unsafe_allow_html=True)
 
     st.markdown("---")
     
@@ -292,14 +329,12 @@ with main_tab2:
         active_custom_name = st.selectbox("분석할 커스텀 포트폴리오 선택", list(st.session_state.custom_portfolios.keys()))
         custom_weights = st.session_state.custom_portfolios[active_custom_name]
         
-        # 커스텀 배당수익률 및 매출 계산
         c_avg_yield = sum(MASTER_ASSETS[t]["yield"] * (w / 100) for t, w in custom_weights.items())
         c_ann_rev = total_capital * (c_avg_yield / 100)
         c_month_rev = c_ann_rev / 12
         c_net_month = c_month_rev - total_monthly_expense
         c_coverage = (c_month_rev / total_monthly_expense * 100) if total_monthly_expense > 0 else 100
 
-        # 투자 성향 자동 판정 로직
         if c_avg_yield < 6.5:
             type_badge = "🛡️ 안정형 성향"
         elif c_avg_yield < 8.5:
@@ -310,17 +345,14 @@ with main_tab2:
             type_badge = "🔥 공격형 성향"
 
         st.markdown("---")
-        # 진단 결과 배너
         st.success(f"🎯 **투자 성향 진단 결과**: 기획자님이 구성하신 포트폴리오는 **[{type_badge}]**에 해당합니다. (연 예상 배당률: **{c_avg_yield:.2f}%**)")
 
-        # 지표 카드
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         m_col1.metric("연간 예상 배당 매출", f"{c_ann_rev/10000:,.0f} 만원")
         m_col2.metric("월 환산 배당 매출", f"{c_month_rev/10000:,.0f} 만원")
         m_col3.metric("법인 월 총 지출", f"{total_monthly_expense/10000:,.0f} 만원")
         m_col4.metric("월 잉여 현금흐름", f"{c_net_month/10000:,.0f} 만원", delta=f"커버리지 {c_coverage:.1f}%")
 
-        # 비중 및 비교 차트
         c_col_chart, c_col_table = st.columns([1, 1])
         with c_col_chart:
             c_pie_df = pd.DataFrame([
@@ -346,7 +378,6 @@ with main_tab2:
                 })
             st.dataframe(pd.DataFrame(c_calc_rows), hide_index=True, use_container_width=True)
             
-            # 삭제 버튼
             if st.button("🗑️ 이 커스텀 포트폴리오 삭제"):
                 del st.session_state.custom_portfolios[active_custom_name]
                 st.rerun()
