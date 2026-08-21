@@ -1,194 +1,352 @@
-from datetime import datetime, timedelta
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import yfinance as yf
+from datetime import datetime, timedelta
 
-# 페이지 설정
+# -------------------------------------------------------------
+# 1. 페이지 기본 설정
+# -------------------------------------------------------------
 st.set_page_config(
-    page_title="50억 법인 포트폴리오 시뮬레이터", layout="wide"
+    page_title="SignalC 법인 포트폴리오",
+    page_icon="📈",
+    layout="wide"
 )
 
-st.title("🏢 50억 법인 자산 운용 및 시뮬레이터")
-st.markdown(
-    "감리·컨설팅 법인 고정비 방어 및 투자 법인 인컴 수익 최적화 대시보드"
-)
-st.markdown("---")
-
-# 1. 사이드바: 기본 설정값 입력
-st.sidebar.header("⚙️ 시뮬레이터 파라미터 설정")
-total_capital = (
-    st.sidebar.number_input(
-        "총 투자 자금 (원)", value=5000000000, step=100_000_000, format="%d"
-    )
-    / 100000000
-)  # 억 단위
-
-st.sidebar.markdown("### 💸 법인 월 고정 지출 설정")
-director_salary = (
-    st.sidebar.number_input("사내이사 월 급여 (원)", value=6666666, step=500_000)
-    / 10000
-)  # 만원
-car_expense = (
-    st.sidebar.number_input(
-        "폴스타 3 리스 및 유지비 (월)", value=2500000, step=200_000
-    )
-    / 10000
-)  # 만원
-office_expense = (
-    st.sidebar.number_input(
-        "사무실 렌탈 및 일반 경비 (월)", value=3000000, step=200_000
-    )
-    / 10000
-)  # 만원
-
-total_monthly_expense_man = director_salary + car_expense + office_expense
-
-# 2. 포트폴리오 구성 데이터 정의
-portfolio_data = {
-    "Asset_Class": [
-        "CD/KOFR 파킹 (안정)",
-        "우량 만기채권 (인컴)",
-        "국내 고배당 ETF (인컴)",
-        "미국 배당/커버드콜 (인컴)",
-        "미국 빅테크/AI (성장)",
-    ],
-    "Ticker": ["357870/423160", "ACE 회사채", "466920", "JEPI / SCHD", "QQQ / SOXX"],
-    "Weight": [0.20, 0.20, 0.20, 0.20, 0.20],
-    "Target_Yield": [0.036, 0.040, 0.072, 0.075, 0.060],  # 연 수익률
+# -------------------------------------------------------------
+# 2. 마스터 데이터 정의 (핵심 7대 상품 풀 & 4대 표준 포트폴리오)
+# -------------------------------------------------------------
+MASTER_ASSETS = {
+    "SGOV": {
+        "name": "iShares 0-3 Month Treasury Bond ETF",
+        "category": "단기채권",
+        "payout": "월배당",
+        "yield": 5.1,
+        "desc": "미국 초단기 국채 투자, 극저변동성 현금성 자산"
+    },
+    "TLT": {
+        "name": "iShares 20+ Year Treasury Bond ETF",
+        "category": "장기국채",
+        "payout": "월배당",
+        "yield": 4.2,
+        "desc": "미국 20년 이상 장기국채, 시장 하락 방어용 자산"
+    },
+    "SCHD": {
+        "name": "Schwab U.S. Dividend Equity ETF",
+        "category": "배당성장",
+        "payout": "분기배당",
+        "yield": 3.6,
+        "desc": "미국 우량 100개 배당성장 기업 분산투자"
+    },
+    "O": {
+        "name": "Realty Income Corp",
+        "category": "부동산(리츠)",
+        "payout": "월배당",
+        "yield": 5.4,
+        "desc": "글로벌 상업용 부동산 월배당 리츠"
+    },
+    "JEPI": {
+        "name": "JPMorgan Equity Premium Income ETF",
+        "category": "옵션인컴",
+        "payout": "월배당",
+        "yield": 7.6,
+        "desc": "S&P500 기반 저변동성 + 커버드콜 옵션 프리미엄"
+    },
+    "JEPQ": {
+        "name": "JPMorgan Nasdaq Equity Premium Income ETF",
+        "category": "옵션인컴",
+        "payout": "월배당",
+        "yield": 9.8,
+        "desc": "나스닥100 대형 테크주 + 옵션 프리미엄 수취"
+    },
+    "TLTW": {
+        "name": "iShares 20+ Year Treasury Bond BuyWrite ETF",
+        "category": "옵션인컴",
+        "payout": "월배당",
+        "yield": 12.2,
+        "desc": "미국 장기국채 기반 커버드콜 고배당 인컴"
+    }
 }
 
-actual_capital = total_capital * 100000000  # 원 단위
-df_portfolio = pd.DataFrame(portfolio_data)
-df_portfolio["Allocated_Capital"] = actual_capital * df_portfolio["Weight"]
-df_portfolio["Annual_Income"] = (
-    df_portfolio["Allocated_Capital"] * df_portfolio["Target_Yield"]
-)
-df_portfolio["Monthly_Income"] = df_portfolio["Annual_Income"] / 12
+STANDARD_PORTFOLIOS = {
+    "안정형": {
+        "target_yield_range": "5.0% ~ 6.0%",
+        "weights": {"SGOV": 40, "SCHD": 40, "O": 20},
+        "desc": "원금 변동성 최소화, 안전 이자 및 기본 배당 확보"
+    },
+    "중립형": {
+        "target_yield_range": "7.0% ~ 8.0%",
+        "weights": {"SCHD": 35, "JEPI": 45, "TLT": 20},
+        "desc": "주가 방어력과 월배당 현금흐름 밸런스 유지"
+    },
+    "투자형": {
+        "target_yield_range": "9.0% ~ 10.0%",
+        "weights": {"JEPI": 40, "JEPQ": 40, "SCHD": 20},
+        "desc": "대표 지수(S&P500/나스닥) 기반 안정적 월 고인컴 창출"
+    },
+    "공격형": {
+        "target_yield_range": "11.0% ~ 12.5%",
+        "weights": {"JEPQ": 50, "TLTW": 30, "JEPI": 20},
+        "desc": "지수 및 미국채 커버드콜을 활용한 법인 현금흐름 극대화"
+    }
+}
 
-total_annual_income = df_portfolio["Annual_Income"].sum()
-weighted_avg_yield = (total_annual_income / actual_capital) * 100
-total_annual_expense = (total_monthly_expense_man * 10000) * 12
-net_annual_cashflow = total_annual_income - total_annual_expense
+# -------------------------------------------------------------
+# 3. 세션 상태(Session State) 초기화
+# -------------------------------------------------------------
+if "custom_portfolios" not in st.session_state:
+    st.session_state.custom_portfolios = {
+        "내 커스텀 1호": {"JEPI": 40, "JEPQ": 30, "SCHD": 20, "SGOV": 10}
+    }
 
-# 3. 메인 KPI 지표 카드
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("총 운용 자금", f"{total_capital:,.1f} 억원")
-col2.metric(
-    "연간 예상 인컴 수익",
-    f"{total_annual_income/100000000:,.2f} 억원",
-    f"가중수익률 {weighted_avg_yield:.2f}%",
-)
-col3.metric(
-    "연간 법인 고정비 지출", f"{total_annual_expense/100000000:,.2f} 억원"
-)
-col4.metric(
-    "연간 잉여 현금흐름 (Net)",
-    f"{net_annual_cashflow/100000000:,.2f} 억원",
-    delta="흑자 구조" if net_annual_cashflow > 0 else "적자 구조",
-)
+# -------------------------------------------------------------
+# 4. 데이터 로드 함수 (캐싱)
+# -------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def load_historical_data(tickers, period="1y"):
+    try:
+        data = yf.download(tickers, period=period, group_by='ticker', auto_adjust=True, progress=False)
+        return data
+    except Exception:
+        return None
 
-st.markdown("---")
+# -------------------------------------------------------------
+# 5. 사이드바 - 투자금 및 법인 지출 설정
+# -------------------------------------------------------------
+st.sidebar.title("🏢 법인 자금 및 지출 설정")
 
-# 4. [복구 완료] 포트폴리오 누적 자산 성장 추이 시뮬레이션 차트
-st.subheader("📈 포트폴리오 누적 자산 성장 추이")
+# 투자 원금 설정
+inv_capital_man = st.sidebar.number_input("총 투자 자본금 (만원 단위)", min_value=1000, value=50000, step=5000)
+total_capital = inv_capital_man * 10000
 
-# 6개월 기간의 시계열 시뮬레이션 데이터 생성
-np.random.seed(42)
-dates = pd.date_range(end=datetime.today(), periods=130, freq="B")
+st.sidebar.markdown("---")
+st.sidebar.subheader("📌 법인 월 고정비")
+exp_salary = st.sidebar.number_input("인건비/급여 (원)", min_value=0, value=3000000, step=100000)
+exp_rent = st.sidebar.number_input("임대료 / 관리비 (원)", min_value=0, value=1000000, step=100000)
+exp_car = st.sidebar.number_input("차량비 (리스/렌트/유류) (원)", min_value=0, value=800000, step=50000)
+exp_sub = st.sidebar.number_input("가전 / 가구 구독료 (원)", min_value=0, value=200000, step=10000)
 
-# 포트폴리오 일일 변동성 및 추세 생성 (가중평균 수익률 반영)
-daily_mean = weighted_avg_yield / 100 / 252
-daily_vol = 0.0045
-random_returns = np.random.normal(daily_mean, daily_vol, len(dates))
+st.sidebar.subheader("📌 법인 월 운영비 및 배당")
+exp_op = st.sidebar.number_input("기타 운영비 (세무/SW 등) (원)", min_value=0, value=500000, step=50000)
+exp_div = st.sidebar.number_input("목표 법인 배당금 (원)", min_value=0, value=0, step=100000)
 
-# 자산 가치 시계열 산출
-asset_values = actual_capital * np.cumprod(1 + random_returns)
-df_trend = pd.DataFrame({"Date": dates, "Portfolio_Value": asset_values})
+monthly_fixed_cost = exp_salary + exp_rent + exp_car + exp_sub
+total_monthly_expense = monthly_fixed_cost + exp_op + exp_div
+annual_expense = total_monthly_expense * 12
 
-# Plotly 차트 생성 (원금 기준선 포함)
-fig = go.Figure()
+# -------------------------------------------------------------
+# 6. 메인 헤더
+# -------------------------------------------------------------
+st.title("SignalC 법인 포트폴리오")
+st.caption("실제 상장 ETF 기반 법인 배당 매출 시뮬레이터 및 투자 성향 진단 시스템")
 
-# 자산 가치 라인 (파란색 실선)
-fig.add_trace(
-    go.Scatter(
-        x=df_trend["Date"],
-        y=df_trend["Portfolio_Value"],
-        mode="lines",
-        name="포트폴리오 평가액",
-        line=dict(color="#0066cc", width=2.5),
-    )
-)
+# 상단 탭 구성
+main_tab1, main_tab2 = st.tabs(["🏛️ 기본 포트폴리오 (4개 표준 모델)", "⚙️ 커스텀 포트폴리오 (맞춤 진단)"])
 
-# 원금 기준선 (빨간색 점선)
-fig.add_shape(
-    type="line",
-    x0=df_trend["Date"].iloc[0],
-    y0=actual_capital,
-    x1=df_trend["Date"].iloc[-1],
-    y1=actual_capital,
-    line=dict(color="red", width=2, dash="dash"),
-)
+# -------------------------------------------------------------
+# TAB 1: 기본 포트폴리오
+# -------------------------------------------------------------
+with main_tab1:
+    st.subheader("1. 4개 표준 모델 통합 비교")
+    
+    # 4개 모델 비교 카드
+    summary_cols = st.columns(4)
+    for idx, (p_name, p_info) in enumerate(STANDARD_PORTFOLIOS.items()):
+        # 가중평균 배당수익률 계산
+        avg_yield = sum(MASTER_ASSETS[t]["yield"] * (w / 100) for t, w in p_info["weights"].items())
+        annual_rev = total_capital * (avg_yield / 100)
+        monthly_rev = annual_rev / 12
+        net_monthly = monthly_rev - total_monthly_expense
+        coverage = (monthly_rev / total_monthly_expense * 100) if total_monthly_expense > 0 else 100
 
-# 원금 텍스트 레이블
-fig.add_annotation(
-    x=df_trend["Date"].iloc[-5],
-    y=actual_capital,
-    text=f"원금 ({total_capital:,.0f}억)",
-    showarrow=False,
-    yshift=12,
-    font=dict(color="red", size=12),
-)
+        with summary_cols[idx]:
+            st.markdown(f"### **{p_name}**")
+            st.caption(f"목표: {p_info['target_yield_range']}")
+            st.metric("예상 연 배당수익률", f"{avg_yield:.2f}%")
+            st.metric("월 예상 배당매출", f"{monthly_rev / 10000:,.0f} 만원")
+            st.metric("월 순이익(잉여)", f"{net_monthly / 10000:,.0f} 만원", delta=f"커버리지 {coverage:.1f}%")
+            
+            # 비중 간략 표시
+            weight_text = " / ".join([f"{t} {w}%" for t, w in p_info["weights"].items()])
+            st.caption(f"구성: {weight_text}")
 
-fig.update_layout(
-    yaxis=dict(
-        title="평가액 (원)",
-        tickformat=".2s",  # 4.8B, 5.0B, 5.2B 포맷
-        gridcolor="#f0f0f0",
-    ),
-    xaxis=dict(gridcolor="#f0f0f0"),
-    plot_bgcolor="white",
-    hovermode="x unified",
-    margin=dict(l=20, r=20, t=20, b=20),
-    height=450,
-)
+    st.markdown("---")
+    
+    # 세부 분석
+    st.subheader("2. 표준 모델 상세 분석")
+    selected_std = st.selectbox("상세 조회할 포트폴리오 선택", list(STANDARD_PORTFOLIOS.keys()))
+    std_info = STANDARD_PORTFOLIOS[selected_std]
+    
+    col_pie, col_breakdown = st.columns([1, 1])
+    with col_pie:
+        pie_df = pd.DataFrame([
+            {"Ticker": t, "Weight": w, "Name": MASTER_ASSETS[t]["name"]}
+            for t, w in std_info["weights"].items()
+        ])
+        fig_pie = px.pie(pie_df, values="Weight", names="Ticker", title=f"[{selected_std}] 자산 배분 비중", hole=0.4)
+        st.plotly_chart(fig_pie, use_container_width=True)
+        
+    with col_breakdown:
+        st.markdown(f"**전략 설명**: {std_info['desc']}")
+        calc_rows = []
+        for t, w in std_info["weights"].items():
+            alloc_cap = total_capital * (w / 100)
+            item_yield = MASTER_ASSETS[t]["yield"]
+            ann_div = alloc_cap * (item_yield / 100)
+            calc_rows.append({
+                "티커": t,
+                "종목명": MASTER_ASSETS[t]["name"],
+                "비중": f"{w}%",
+                "투자금액": f"{alloc_cap/10000:,.0f} 만원",
+                "연 배당률": f"{item_yield}%",
+                "월 예상 배당": f"{ann_div/12/10000:,.0f} 만원"
+            })
+        st.dataframe(pd.DataFrame(calc_rows), hide_index=True, use_container_width=True)
 
-st.plotly_chart(fig, use_container_width=True)
+    st.markdown("---")
+    st.subheader("3. 투자 상품 탐색 및 개별 추이")
+    
+    # 사용된 포트폴리오 플래그 매핑
+    asset_table_rows = []
+    for ticker, info in MASTER_ASSETS.items():
+        used_types = []
+        for p_name, p_data in STANDARD_PORTFOLIOS.items():
+            if ticker in p_data["weights"]:
+                used_types.append(f"{p_name}({p_data['weights'][ticker]}%)")
+        
+        asset_table_rows.append({
+            "티커": ticker,
+            "종목명": info["name"],
+            "카테고리": info["category"],
+            "배당주기": info["payout"],
+            "연 배당수익률": f"{info['yield']}%",
+            "적용 포트폴리오 플래그": ", ".join(used_types)
+        })
+    st.dataframe(pd.DataFrame(asset_table_rows), hide_index=True, use_container_width=True)
 
-st.markdown("---")
+    # 개별 종목 차트 조회
+    chart_col1, chart_col2 = st.columns([1, 3])
+    with chart_col1:
+        selected_ticker = st.selectbox("과거 추이 조회 종목", list(MASTER_ASSETS.keys()))
+        selected_period = st.radio("조회 기간", ["3mo", "6mo", "1y", "3y"], index=2)
+    
+    with chart_col2:
+        hist_data = load_historical_data(selected_ticker, period=selected_period)
+        if hist_data is not None and not hist_data.empty:
+            df_plot = hist_data.reset_index()
+            # yfinance 다중 인덱스 처리
+            if ('Close', selected_ticker) in df_plot.columns:
+                close_col = ('Close', selected_ticker)
+            else:
+                close_col = 'Close'
+            
+            fig_hist = px.line(df_plot, x='Date', y=close_col, title=f"{selected_ticker} 주가 추이 ({selected_period})")
+            st.plotly_chart(fig_hist, use_container_width=True)
+        else:
+            st.info("데이터를 불러오는 중이거나 종목 시세를 일시적으로 가져올 수 없습니다.")
 
-# 5. 상세 포트폴리오 테이블
-st.subheader("📊 50억 자산 배분 및 종목별 인컴 구조")
-display_df = df_portfolio[
-    ["Asset_Class", "Ticker", "Weight", "Target_Yield", "Annual_Income"]
-].copy()
-display_df["Weight"] = display_df["Weight"] * 100
-display_df["Target_Yield"] = display_df["Target_Yield"] * 100
-display_df.columns = [
-    "자산군",
-    "대표 티커",
-    "비중 (%)",
-    "목표 수익률 (%)",
-    "연간 예상 수익 (원)",
-]
-display_df["연간 예상 수익 (원)"] = display_df["연간 예상 수익 (원)"].apply(
-    lambda x: f"{x:,.0f} 원"
-)
+# -------------------------------------------------------------
+# TAB 2: 커스텀 포트폴리오 (진단 & 시뮬레이션)
+# -------------------------------------------------------------
+# 모달 다이얼로그 정의 (Streamlit 1.33+ st.dialog 지원)
+@st.dialog("🛠️ 커스텀 포트폴리오 생성/수정")
+def custom_portfolio_dialog():
+    p_name_input = st.text_input("포트폴리오 명칭", value="내 맞춤 포트폴리오")
+    st.write("각 상품의 투자 비중(%)을 설정해 주세요 (합계: 100% 필수)")
+    
+    weights_input = {}
+    cols = st.columns(2)
+    for idx, ticker in enumerate(MASTER_ASSETS.keys()):
+        col = cols[idx % 2]
+        weights_input[ticker] = col.slider(
+            f"{ticker} ({MASTER_ASSETS[ticker]['category']})",
+            min_value=0, max_value=100, value=0, step=5
+        )
+    
+    total_w = sum(weights_input.values())
+    if total_w == 100:
+        st.success(f"비중 합계: {total_w}% (정상)")
+        if st.button("저장하기", type="primary"):
+            filtered_weights = {k: v for k, v in weights_input.items() if v > 0}
+            st.session_state.custom_portfolios[p_name_input] = filtered_weights
+            st.rerun()
+    else:
+        st.error(f"현재 비중 합계: {total_w}% (반드시 100%로 맞춰주세요)")
 
-st.dataframe(display_df, use_container_width=True)
+with main_tab2:
+    col_custom_head, col_custom_btn = st.columns([3, 1])
+    with col_custom_head:
+        st.subheader("내가 조합하는 커스텀 포트폴리오 & 성향 진단")
+    with col_custom_btn:
+        if st.button("➕ 새 커스텀 포트폴리오 구성"):
+            custom_portfolio_dialog()
 
-st.markdown("---")
+    if not st.session_state.custom_portfolios:
+        st.info("우측 상단의 버튼을 눌러 나만의 커스텀 포트폴리오를 만들어보세요.")
+    else:
+        active_custom_name = st.selectbox("분석할 커스텀 포트폴리오 선택", list(st.session_state.custom_portfolios.keys()))
+        custom_weights = st.session_state.custom_portfolios[active_custom_name]
+        
+        # 커스텀 배당수익률 및 매출 계산
+        c_avg_yield = sum(MASTER_ASSETS[t]["yield"] * (w / 100) for t, w in custom_weights.items())
+        c_ann_rev = total_capital * (c_avg_yield / 100)
+        c_month_rev = c_ann_rev / 12
+        c_net_month = c_month_rev - total_monthly_expense
+        c_coverage = (c_month_rev / total_monthly_expense * 100) if total_monthly_expense > 0 else 100
 
-# 6. 월별 현금흐름 시뮬레이션
-st.subheader("📅 월별 인컴 유입 vs 고정비 지출 시뮬레이션")
-div_sim_results = []
-for i in range(1, 13):
-  div_sim_results.append({
-      "Month": f"{i}월",
-      "월별 배당/이자 유입": total_annual_income / 12,
-      "월별 고정비 지출": total_annual_expense / 12,
-  })
+        # 투자 성향 자동 판정 로직
+        if c_avg_yield < 6.5:
+            diagnosed_type = "안정형 (Stability)"
+            type_badge = "🛡️ 안정형 성향"
+        elif c_avg_yield < 8.5:
+            diagnosed_type = "중립형 (Balanced)"
+            type_badge = "⚖️ 중립형 성향"
+        elif c_avg_yield < 10.5:
+            diagnosed_type = "투자형 (Growth Income)"
+            type_badge = "🚀 투자형 성향"
+        else:
+            diagnosed_type = "공격형 (Aggressive Income)"
+            type_badge = "🔥 공격형 성향"
 
-df_sim = pd.DataFrame(div_sim_results)
-df_sim.set_index("Month", inplace=True)
-st.bar_chart(df_sim)
+        st.markdown("---")
+        # 진단 결과 배너
+        st.success(f"🎯 **투자 성향 진단 결과**: 기획자님이 구성하신 포트폴리오는 **[{type_badge}]**에 해당합니다. (연 예상 배당률: **{c_avg_yield:.2f}%**)")
+
+        # 지표 카드
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        m_col1.metric("연간 예상 배당 매출", f"{c_ann_rev/10000:,.0f} 만원")
+        m_col2.metric("월 환산 배당 매출", f"{c_month_rev/10000:,.0f} 만원")
+        m_col3.metric("법인 월 총 지출", f"{total_monthly_expense/10000:,.0f} 만원")
+        m_col4.metric("월 잉여 현금흐름", f"{c_net_month/10000:,.0f} 만원", delta=f"커버리지 {c_coverage:.1f}%")
+
+        # 비중 및 비교 차트
+        c_col_chart, c_col_table = st.columns([1, 1])
+        with c_col_chart:
+            c_pie_df = pd.DataFrame([
+                {"Ticker": t, "Weight": w, "Name": MASTER_ASSETS[t]["name"]}
+                for t, w in custom_weights.items()
+            ])
+            fig_custom_pie = px.pie(c_pie_df, values="Weight", names="Ticker", title=f"[{active_custom_name}] 비중 구조", hole=0.4)
+            st.plotly_chart(fig_custom_pie, use_container_width=True)
+
+        with c_col_table:
+            st.write("**편입 상품별 매출 기여도**")
+            c_calc_rows = []
+            for t, w in custom_weights.items():
+                alloc_cap = total_capital * (w / 100)
+                item_yield = MASTER_ASSETS[t]["yield"]
+                ann_div = alloc_cap * (item_yield / 100)
+                c_calc_rows.append({
+                    "티커": t,
+                    "종목명": MASTER_ASSETS[t]["name"],
+                    "비중": f"{w}%",
+                    "연 배당률": f"{item_yield}%",
+                    "월 예상 배당": f"{ann_div/12/10000:,.0f} 만원"
+                })
+            st.dataframe(pd.DataFrame(c_calc_rows), hide_index=True, use_container_width=True)
+            
+            # 삭제 버튼
+            if st.button("🗑️ 이 커스텀 포트폴리오 삭제"):
+                del st.session_state.custom_portfolios[active_custom_name]
+                st.rerun()
