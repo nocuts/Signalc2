@@ -112,7 +112,7 @@ if "custom_portfolios" not in st.session_state:
     }
 
 # -------------------------------------------------------------
-# 4. 주가 데이터 로드 함수 (개별 안전 호출 및 정제)
+# 4. 주가 데이터 로드 함수 (2026년 1월부터 포괄하도록 1y 로드)
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_all_prices():
@@ -120,7 +120,7 @@ def load_all_prices():
     for t in MASTER_ASSETS.keys():
         try:
             stock = yf.Ticker(t)
-            df = stock.history(period="3mo")
+            df = stock.history(period="1y")
             if not df.empty and 'Close' in df.columns:
                 df = df.reset_index()
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
@@ -139,35 +139,62 @@ inv_capital_man = st.sidebar.number_input("총 투자 자본금 (만원 단위)"
 total_capital = inv_capital_man * 10000
 
 # -------------------------------------------------------------
-# 6. 메인 헤더
+# 6. 메인 헤더 & 월 선택 컨트롤러
 # -------------------------------------------------------------
 st.title("SignalC 법인 포트폴리오")
-st.caption("4대 표준 포트폴리오 당월 성과 추이 및 맞춤 진단 시뮬레이터")
+st.caption("4대 표준 포트폴리오 월별 성과 추이 및 맞춤 진단 시뮬레이터")
 
 main_tab1, main_tab2 = st.tabs(["🏛️ 기본 포트폴리오 (4개 표준 모델)", "⚙️ 커스텀 포트폴리오 (맞춤 진단)"])
 
 prices = load_all_prices()
 
-# 기준 날짜 계산 (데이터 기준 최신 일자 추정)
+# 최신 날짜 파악
 if prices:
     all_dates = pd.concat([pd.Series(s.index) for s in prices.values() if not s.empty])
     latest_dt = all_dates.max() if not all_dates.empty else datetime.today()
 else:
     latest_dt = datetime.today()
 
-year, month = latest_dt.year, latest_dt.month
-_, last_day_num = calendar.monthrange(year, month)
+curr_year, curr_month = latest_dt.year, latest_dt.month
 
-start_of_month = datetime(year, month, 1)
-end_of_month = datetime(year, month, last_day_num)
-prev_month_end = start_of_month - pd.Timedelta(days=1)
+# 2026년 1월부터 현재 월까지 옵션 리스트 자동 생성
+month_options = []
+start_yr, start_mo = 2026, 1
+
+for y in range(start_yr, curr_year + 1):
+    m_start = start_mo if y == start_yr else 1
+    m_end = curr_month if y == curr_year else 12
+    for m in range(m_start, m_end + 1):
+        month_options.append(f"{y}년 {m:02d}월")
 
 # -------------------------------------------------------------
 # TAB 1: 기본 포트폴리오 (2x2 그리드)
 # -------------------------------------------------------------
 with main_tab1:
-    st.subheader(f"📊 당월({year}년 {month}월) 4대 포트폴리오 & 상품별 실시간 성과 추이")
+    col_title, col_sel = st.columns([3, 1])
+    with col_sel:
+        # 기본 디폴트는 가장 최신월 (리스트 마지막 요소)
+        selected_month_str = st.selectbox(
+            "조회 월 선택",
+            options=month_options,
+            index=len(month_options) - 1,
+            label_visibility="collapsed"
+        )
     
+    # 선택된 년/월 파싱
+    sel_year = int(selected_month_str.split("년")[0])
+    sel_month = int(selected_month_str.split("년")[1].replace("월", "").strip())
+    
+    with col_title:
+        st.subheader(f"📊 {sel_year}년 {sel_month:02d}월 포트폴리오 성과 추이")
+
+    # 선택된 월의 1일 및 말일 설정
+    _, last_day_num = calendar.monthrange(sel_year, sel_month)
+    target_start_of_month = datetime(sel_year, sel_month, 1)
+    target_end_of_month = datetime(sel_year, sel_month, last_day_num)
+    target_prev_month_end = target_start_of_month - pd.Timedelta(days=1)
+
+    # 2x2 그리드 컬럼 배치
     grid_row1_col1, grid_row1_col2 = st.columns(2)
     grid_row2_col1, grid_row2_col2 = st.columns(2)
     grid_cells = [grid_row1_col1, grid_row1_col2, grid_row2_col1, grid_row2_col2]
@@ -176,14 +203,13 @@ with main_tab1:
         cell = grid_cells[idx]
         with cell:
             with st.container(border=True):
-                # 데이터 유효성 검사
                 valid_tickers = [t for t in p_info["weights"] if t in prices and len(prices[t]) > 0]
                 
                 if len(valid_tickers) == len(p_info["weights"]):
-                    # 당월 데이터 날짜 인덱스 추출
+                    # 선택된 월 데이터 날짜 인덱스 추출 (전월말 기준일 포함)
                     all_month_dates = []
                     for t in valid_tickers:
-                        s_m = prices[t][prices[t].index >= prev_month_end]
+                        s_m = prices[t][(prices[t].index >= target_prev_month_end) & (prices[t].index <= target_end_of_month)]
                         if not s_m.empty:
                             all_month_dates.extend(s_m.index)
                     
@@ -198,23 +224,27 @@ with main_tab1:
                             s = prices[t]
                             
                             # 전월말 기준가 찾기 (없으면 당월 첫 데이터 기준)
-                            prev_close = s[s.index <= start_of_month]
+                            prev_close = s[s.index <= target_start_of_month]
                             if not prev_close.empty:
                                 prev_val = float(prev_close.iloc[-1])
                             else:
-                                prev_val = float(s.iloc[0])
+                                s_in_m = s[s.index >= target_start_of_month]
+                                prev_val = float(s_in_m.iloc[0]) if not s_in_m.empty else float(s.iloc[0])
                             
-                            curr_val = float(s.iloc[-1])
+                            # 해당 월 내의 종가들
+                            s_in_month = s[(s.index >= target_start_of_month) & (s.index <= target_end_of_month)]
+                            curr_val = float(s_in_month.iloc[-1]) if not s_in_month.empty else prev_val
+                            
                             chg_pct = ((curr_val - prev_val) / prev_val) * 100 if prev_val != 0 else 0.0
                             item_changes[t] = chg_pct
 
-                            # 당월 등락률(%) 시계열 생성
+                            # 시계열 등락률(%)
                             s_aligned = s.reindex(month_dates).ffill().bfill()
                             base_val = s_aligned.iloc[0] if s_aligned.iloc[0] != 0 else 1.0
                             norm_single = (s_aligned / base_val - 1.0) * 100
                             item_series_dict[t] = norm_single
                             
-                            # 포트폴리오 가중합산
+                            # 가중합산
                             portfolio_values += (norm_single * (w / 100))
 
                         current_perf_pct = portfolio_values.iloc[-1]
@@ -230,7 +260,7 @@ with main_tab1:
                             symbol = "-"
                             color_style = "color:#4B5563;"
 
-                        # 카드 헤더
+                        # 카드 상단 헤더
                         st.markdown(f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
                                     f"<h3 style='margin:0;'>{p_name}</h3>"
                                     f"<span style='font-size:13px; color:gray;'>목표: {p_info['target_yield_range']}</span>"
@@ -238,13 +268,13 @@ with main_tab1:
                         
                         st.markdown(f"""
                         <div style='margin: 8px 0;'>
-                            <span style='font-size:13px; color:#555;'>전월 대비 당월 수익률:</span> 
+                            <span style='font-size:13px; color:#555;'>전월 대비 수익률:</span> 
                             <strong style='font-size:19px; {color_style}'>{symbol} {current_perf_pct:+.2f}%</strong>
                             <span style='font-size:13px; margin-left:6px; {color_style}'>({current_perf_krw/10000:+,.0f} 만원)</span>
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # 다중 라인 차트
+                        # 다중 라인 차트 생성
                         fig = go.Figure()
                         fig.add_hline(y=0, line_dash="dot", line_color="#D1D5DB", line_width=1)
 
@@ -276,7 +306,7 @@ with main_tab1:
                             height=250,
                             margin=dict(l=5, r=5, t=10, b=5),
                             xaxis=dict(
-                                range=[start_of_month, end_of_month],
+                                range=[target_start_of_month, target_end_of_month],
                                 tickformat="%d일",
                                 dtick=86400000.0 * 5,
                                 showgrid=True,
@@ -313,7 +343,7 @@ with main_tab1:
                             )
                         st.markdown("<div style='margin-top:2px; line-height:1.9;'>" + "".join(badge_htmls) + "</div>", unsafe_allow_html=True)
                     else:
-                        st.info("당월 시세 데이터를 불러오는 중입니다.")
+                        st.info(f"{sel_year}년 {sel_month:02d}월 데이터를 집계 중입니다.")
                 else:
                     st.info("실시간 시세 데이터를 연동 중입니다.")
 
