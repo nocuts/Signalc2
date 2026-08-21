@@ -24,50 +24,57 @@ MASTER_ASSETS = {
         "name": "iShares 0-3 Month Treasury Bond ETF",
         "category": "단기채권",
         "payout": "월배당",
+        "total_payouts": 12,
         "yield": 5.1,
-        "desc": "미국 초단기 국채 투자, 극저변동성 현금성 자산"
+        "desc": "미국 초단기 국채(0~3개월)에 투자하는 극저변동성 현금성 자산 ETF입니다. 원금 보존력이 뛰어나며 단기 유동성 자금 관리에 최적화되어 있습니다."
     },
     "TLT": {
         "name": "iShares 20+ Year Treasury Bond ETF",
         "category": "장기국채",
         "payout": "월배당",
+        "total_payouts": 12,
         "yield": 4.2,
-        "desc": "미국 20년 이상 장기국채, 시장 하락 방어용 자산"
+        "desc": "미국 20년 이상 만기 장기 국채에 투자합니다. 금리 인하기 자본 차익 및 주식 시장 하락 시 강력한 법인 포트폴리오 방어선 역할을 합니다."
     },
     "SCHD": {
         "name": "Schwab U.S. Dividend Equity ETF",
         "category": "배당성장",
         "payout": "분기배당",
+        "total_payouts": 4,
         "yield": 3.6,
-        "desc": "미국 우량 100개 배당성장 기업 분산투자"
+        "desc": "10년 연속 배당을 증액한 미국 우량 100개 기업에 분산투자합니다. 장기적인 주가 상승과 배당금 성장을 동시에 추구하는 핵심 자산입니다."
     },
     "O": {
         "name": "Realty Income Corp",
         "category": "부동산(리츠)",
         "payout": "월배당",
+        "total_payouts": 12,
         "yield": 5.4,
-        "desc": "글로벌 상업용 부동산 월배당 리츠"
+        "desc": "전 세계 15,000개 이상의 상업용 부동산을 보유한 대표적인 월배당 리츠입니다. 장기 임대 계약을 통해 안정적인 월간 임대료 현금흐름을 제공합니다."
     },
     "JEPI": {
         "name": "JPMorgan Equity Premium Income ETF",
         "category": "옵션인컴",
         "payout": "월배당",
+        "total_payouts": 12,
         "yield": 7.6,
-        "desc": "S&P500 기반 저변동성 + 커버드콜 옵션 프리미엄"
+        "desc": "S&P500 기반 저변동성 대형주 포트폴리오와 주가지수 연계 ELN(커버드콜) 옵션 프리미엄을 결합하여 매월 높은 배당금을 지급합니다."
     },
     "JEPQ": {
         "name": "JPMorgan Nasdaq Equity Premium Income ETF",
         "category": "옵션인컴",
         "payout": "월배당",
+        "total_payouts": 12,
         "yield": 9.8,
-        "desc": "나스닥100 대형 테크주 + 옵션 프리미엄 수취"
+        "desc": "나스닥100 대형 테크 성장주를 보유하면서 나스닥 지수 옵션 매도 프리미엄을 수취하여 고인컴 월배당을 창출하는 ETF입니다."
     },
     "TLTW": {
         "name": "iShares 20+ Year Treasury Bond BuyWrite ETF",
         "category": "옵션인컴",
         "payout": "월배당",
+        "total_payouts": 12,
         "yield": 12.2,
-        "desc": "미국 장기국채 기반 커버드콜 고배당 인컴"
+        "desc": "미국 20년 장기국채(TLT)에 콜옵션 매도 전략(Buy-Write)을 적용해 12% 내외의 초고배당 현금흐름을 발생시키는 월배당 인컴 상품입니다."
     }
 }
 
@@ -113,14 +120,16 @@ if "custom_portfolios" not in st.session_state:
     }
 
 # -------------------------------------------------------------
-# 4. 주가 데이터 로드 함수 (최근 1년치 로드)
+# 4. 주가 및 배당 데이터 로드 함수 (최근 1년치 캐싱)
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600)
-def load_all_prices():
+def load_all_market_data():
     price_dict = {}
+    div_dict = {}
     for t in MASTER_ASSETS.keys():
         try:
             stock = yf.Ticker(t)
+            # 주가 데이터 로드
             df = stock.history(period="1y")
             if not df.empty and 'Close' in df.columns:
                 df = df.reset_index()
@@ -128,12 +137,100 @@ def load_all_prices():
                 s = df.set_index('Date')['Close'].dropna()
                 if len(s) > 0:
                     price_dict[t] = s
+            # 배당금 데이터 로드
+            divs = stock.dividends
+            if not divs.empty:
+                divs.index = pd.to_datetime(divs.index).dt.tz_localize(None)
+                div_dict[t] = divs
+            else:
+                div_dict[t] = pd.Series(dtype=float)
         except Exception:
             pass
-    return price_dict
+    return price_dict, div_dict
 
 # -------------------------------------------------------------
-# 5. 심층 리포트 모달 다이얼로그
+# 5. 개별 상품 상세 모달 다이얼로그
+# -------------------------------------------------------------
+@st.dialog("ℹ️ 종목 상세 분석 및 추이", width="large")
+def show_asset_detail_modal(ticker, total_capital, prices, divs):
+    info = MASTER_ASSETS[ticker]
+    st.markdown(f"### **{ticker}** · <span style='font-size:18px; color:#555;'>{info['name']}</span>", unsafe_allow_html=True)
+    st.info(f"💡 **상품 특징**: {info['desc']}")
+    
+    # 상단 메트릭
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("카테고리 / 주기", f"{info['category']} ({info['payout']})")
+    col_m2.metric("연 배당수익률", f"{info['yield']}%")
+    
+    if ticker in prices and not prices[ticker].empty:
+        curr_p = prices[ticker].iloc[-1]
+        col_m3.metric("현재가 (USD)", f"${curr_p:.2f}")
+    
+    st.markdown("---")
+    st.markdown("#### 📈 기간별 주가 추이")
+    
+    period_choice = st.segmented_control(
+        "조회 기간",
+        options=["1개월", "3개월", "6개월", "1년"],
+        default="3개월",
+        label_visibility="collapsed"
+    )
+    
+    if ticker in prices and not prices[ticker].empty:
+        s = prices[ticker]
+        days_map = {"1개월": 21, "3개월": 63, "6개월": 126, "1년": 252}
+        n_days = days_map.get(period_choice, 63)
+        s_cut = s.iloc[-min(len(s), n_days):]
+        
+        chg = ((s_cut.iloc[-1] - s_cut.iloc[0]) / s_cut.iloc[0]) * 100
+        chg_color = "#DC2626" if chg > 0 else ("#2563EB" if chg < 0 else "#4B5563")
+        chg_sym = "▲" if chg > 0 else ("▼" if chg < 0 else "-")
+        
+        st.markdown(f"선택 기간 수익률: <strong style='color:{chg_color};'>{chg_sym} {chg:+.2f}%</strong>", unsafe_allow_html=True)
+        
+        fig_asset = go.Figure()
+        fig_asset.add_trace(go.Scatter(
+            x=s_cut.index,
+            y=s_cut.values,
+            mode='lines',
+            line=dict(color=TICKER_COLORS.get(ticker, '#2563EB'), width=2.5),
+            fill='tozeroy',
+            fillcolor='rgba(37, 99, 235, 0.05)',
+            hovertemplate='%{x|%Y-%m-%d} 주가: $%{y:.2f}<extra></extra>'
+        ))
+        fig_asset.update_layout(
+            height=260,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis=dict(showgrid=True, gridcolor="#F3F4F6"),
+            yaxis=dict(tickprefix="$", showgrid=True, gridcolor="#F3F4F6"),
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+        st.plotly_chart(fig_asset, use_container_width=True)
+    
+    st.markdown("---")
+    st.markdown("#### 💵 2026년 배당 지급 상세 이력")
+    
+    # 2026년 배당 이력 테이블
+    if ticker in divs and not divs[ticker].empty:
+        div_series = divs[ticker]
+        div_2026 = div_series[div_series.index.year == 2026]
+        if not div_2026.empty:
+            div_rows = []
+            for dt, val in div_2026.items():
+                div_rows.append({
+                    "지급(배당락) 일자": dt.strftime("%Y-%m-%d"),
+                    "주당 배당금": f"${val:.4f}",
+                    "상태": "지급 완료"
+                })
+            st.dataframe(pd.DataFrame(div_rows), hide_index=True, use_container_width=True)
+        else:
+            st.caption("2026년 확정 배당 데이터가 아직 집계되지 않았습니다.")
+    else:
+        st.caption("배당 내역 데이터를 조회 중입니다.")
+
+# -------------------------------------------------------------
+# 6. 포트폴리오 심층 성과 리포트 모달 다이얼로그
 # -------------------------------------------------------------
 @st.dialog("📊 포트폴리오 심층 성과 리포트", width="large")
 def show_portfolio_report(p_name, p_info, prices):
@@ -154,10 +251,8 @@ def show_portfolio_report(p_name, p_info, prices):
         
         tot_days = len(daily_norm)
         ret_1y = ((daily_norm.iloc[-1] / daily_norm.iloc[0]) - 1.0) * 100 if tot_days > 0 else 0
-        
         idx_6m = max(0, tot_days - 126)
         ret_6m = ((daily_norm.iloc[-1] / daily_norm.iloc[idx_6m]) - 1.0) * 100 if tot_days > 0 else 0
-        
         idx_3m = max(0, tot_days - 63)
         ret_3m = ((daily_norm.iloc[-1] / daily_norm.iloc[idx_3m]) - 1.0) * 100 if tot_days > 0 else 0
 
@@ -182,33 +277,30 @@ def show_portfolio_report(p_name, p_info, prices):
                 "월간 수익률": f"{val:+.2f}%",
                 "상태": "▲ 상승" if val > 0 else ("▼ 하락" if val < 0 else "- 보합")
             })
-        
         st.dataframe(pd.DataFrame(month_rows).iloc[::-1], hide_index=True, use_container_width=True)
         
         st.markdown("#### 📈 최근 1년 자산 가치 성장 추이 (기준지수 1.0)")
         fig_rep = px.line(daily_df, x=daily_df.index, y='value', labels={'value': '자산 지수 (시작=1.0)', 'index': '날짜'})
         fig_rep.update_traces(line_color="#1E3A8A", hovertemplate="%{x|%Y-%m-%d}: 지수 %{y:.3f}")
-        fig_rep.update_layout(height=280, margin=dict(l=5, r=5, t=10, b=5))
+        fig_rep.update_layout(height=260, margin=dict(l=5, r=5, t=10, b=5))
         st.plotly_chart(fig_rep, use_container_width=True)
-    else:
-        st.warning("충분한 과거 데이터가 확보되지 않았습니다.")
 
 # -------------------------------------------------------------
-# 6. 사이드바 - 자본 설정
+# 7. 사이드바 - 자본 설정
 # -------------------------------------------------------------
 st.sidebar.title("🏢 투자 자본 설정")
 inv_capital_man = st.sidebar.number_input("총 투자 자본금 (만원 단위)", min_value=1000, value=50000, step=5000)
 total_capital = inv_capital_man * 10000
 
 # -------------------------------------------------------------
-# 7. 메인 헤더 & 월 선택 컨트롤러
+# 8. 메인 헤더 & 월 선택 컨트롤러
 # -------------------------------------------------------------
 st.title("SignalC 법인 포트폴리오")
 st.caption("4대 표준 포트폴리오 월별 성과 추이 및 맞춤 진단 시뮬레이터")
 
 main_tab1, main_tab2 = st.tabs(["🏛️ 기본 포트폴리오 (4개 표준 모델)", "⚙️ 커스텀 포트폴리오 (맞춤 진단)"])
 
-prices = load_all_prices()
+prices, divs = load_all_market_data()
 
 if prices:
     all_dates = pd.concat([pd.Series(s.index) for s in prices.values() if not s.empty])
@@ -228,7 +320,7 @@ for y in range(start_yr, curr_year + 1):
         month_options.append(f"{y}년 {m:02d}월")
 
 # -------------------------------------------------------------
-# TAB 1: 기본 포트폴리오 (2x2 그리드 & BEST 뱃지 & 리포트)
+# TAB 1: 기본 포트폴리오 (2x2 그리드 & 종합 정보 리스트)
 # -------------------------------------------------------------
 with main_tab1:
     col_title, col_sel = st.columns([3, 1])
@@ -297,6 +389,7 @@ with main_tab1:
 
     best_portfolio = max(perf_records, key=perf_records.get) if perf_records else None
 
+    # 2x2 그리드 카드 출력
     grid_row1_col1, grid_row1_col2 = st.columns(2)
     grid_row2_col1, grid_row2_col2 = st.columns(2)
     grid_cells = [grid_row1_col1, grid_row1_col2, grid_row2_col1, grid_row2_col2]
@@ -407,23 +500,50 @@ with main_tab1:
                             f"{t} ({p_info['weights'][t]}%) {sym}{chg:+.1f}%</span>"
                         )
                     st.markdown("<div style='margin-top:2px; line-height:1.9;'>" + "".join(badge_htmls) + "</div>", unsafe_allow_html=True)
-                else:
-                    st.info("데이터를 집계 중입니다.")
 
+    # ---------------------------------------------------------
+    # 하단: 편입 상품 종합 리스트 (원화 배당 현황 + 모달 연동)
+    # ---------------------------------------------------------
     st.markdown("---")
-    st.subheader("📋 포트폴리오 편입 상품 종합 정보")
-    asset_rows = []
+    st.subheader("📋 포트폴리오 편입 상품 종합 정보 (2026년 누적 현황)")
+    st.caption("각 상품의 상세 버튼(ℹ️)을 클릭하면 기간별 주가 차트와 세부 배당 내역을 확인할 수 있습니다.")
+
     for ticker, info in MASTER_ASSETS.items():
-        used_types = [f"{p_name}({p_data['weights'][ticker]}%)" for p_name, p_data in STANDARD_PORTFOLIOS.items() if ticker in p_data["weights"]]
-        asset_rows.append({
-            "티커": ticker,
-            "종목명": info["name"],
-            "카테고리": info["category"],
-            "배당주기": info["payout"],
-            "연 배당수익률": f"{info['yield']}%",
-            "적용 포트폴리오": ", ".join(used_types)
-        })
-    st.dataframe(pd.DataFrame(asset_rows), hide_index=True, use_container_width=True)
+        # 당해 연도 배당 회차 및 누적 원화 계산
+        total_p = info["total_payouts"]
+        current_p = 0
+        
+        if info["payout"] == "월배당":
+            current_p = curr_month
+        elif info["payout"] == "분기배당":
+            current_p = (curr_month // 3)
+            
+        # 해당 종목에 원금을 전액(또는 평균) 투자했을 때의 누적 원화 수령액 추정 (만원 단위)
+        ann_expected_krw = total_capital * (info["yield"] / 100)
+        cum_krw = ann_expected_krw * (current_p / total_p)
+        
+        # 적용 포트폴리오
+        used_portfolios = [f"{p_name}({p_data['weights'][ticker]}%)" for p_name, p_data in STANDARD_PORTFOLIOS.items() if ticker in p_data["weights"]]
+        used_str = ", ".join(used_portfolios)
+
+        with st.container(border=True):
+            r_c1, r_c2, r_c3, r_c4 = st.columns([1.5, 2.5, 3.5, 1.2])
+            
+            with r_c1:
+                st.markdown(f"<strong style='font-size:16px; color:#1E3A8A;'>{ticker}</strong>", unsafe_allow_html=True)
+                st.caption(f"{info['category']} · {info['payout']}")
+            
+            with r_c2:
+                st.markdown(f"<span style='font-size:13px; font-weight:500;'>{info['name']}</span>", unsafe_allow_html=True)
+                st.caption(f"연 배당수익률: **{info['yield']}%**")
+                
+            with r_c3:
+                st.markdown(f"**2026 배당 진행**: <span style='color:#DC2626; font-weight:bold;'>{current_p}/{total_p}회</span> (누적 **{cum_krw/10000:,.0f}만원**)", unsafe_allow_html=True)
+                st.caption(f"적용: {used_str}")
+                
+            with r_c4:
+                if st.button("ℹ️ 상세", key=f"btn_modal_{ticker}", use_container_width=True):
+                    show_asset_detail_modal(ticker, total_capital, prices, divs)
 
 # -------------------------------------------------------------
 # TAB 2: 커스텀 포트폴리오 (진단 & 시뮬레이션)
