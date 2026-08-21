@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 import yfinance as yf
 from datetime import datetime
 import calendar
@@ -112,7 +113,7 @@ if "custom_portfolios" not in st.session_state:
     }
 
 # -------------------------------------------------------------
-# 4. 주가 데이터 로드 함수 (2026년 1월부터 포괄하도록 1y 로드)
+# 4. 주가 데이터 로드 함수 (최근 1년치 로드)
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_all_prices():
@@ -132,14 +133,82 @@ def load_all_prices():
     return price_dict
 
 # -------------------------------------------------------------
-# 5. 사이드바 - 자본 설정
+# 5. 심층 리포트 모달 다이얼로그
+# -------------------------------------------------------------
+@st.dialog("📊 포트폴리오 심층 성과 리포트", width="large")
+def show_portfolio_report(p_name, p_info, prices):
+    st.markdown(f"### **[{p_name}] 중장기 성과 리포트**")
+    st.caption(f"전략 목표: {p_info['desc']} (목표 배당률: {p_info['target_yield_range']})")
+    
+    # 1년 합성 일별 시계열 생성
+    valid_tickers = [t for t in p_info["weights"] if t in prices and len(prices[t]) > 0]
+    if len(valid_tickers) == len(p_info["weights"]):
+        # 공통 일자 인덱스
+        common_idx = prices[valid_tickers[0]].index
+        for t in valid_tickers[1:]:
+            common_idx = common_idx.intersection(prices[t].index)
+        common_idx = sorted(common_idx)
+        
+        # 일별 합성 수익률 시리즈 (시작일 = 100 기준)
+        daily_norm = pd.Series(0.0, index=common_idx)
+        for t, w in p_info["weights"].items():
+            s = prices[t].reindex(common_idx).ffill().bfill()
+            daily_norm += (s / s.iloc[0]) * (w / 100)
+        
+        # 3개월, 6개월, 1년 기간 수익률 계산
+        tot_days = len(daily_norm)
+        ret_1y = ((daily_norm.iloc[-1] / daily_norm.iloc[0]) - 1.0) * 100 if tot_days > 0 else 0
+        
+        idx_6m = max(0, tot_days - 126)
+        ret_6m = ((daily_norm.iloc[-1] / daily_norm.iloc[idx_6m]) - 1.0) * 100 if tot_days > 0 else 0
+        
+        idx_3m = max(0, tot_days - 63)
+        ret_3m = ((daily_norm.iloc[-1] / daily_norm.iloc[idx_3m]) - 1.0) * 100 if tot_days > 0 else 0
+
+        # 요약 메트릭
+        m1, m2, m3 = st.columns(3)
+        m1.metric("최근 3개월 누적 수익률", f"{ret_3m:+.2f}%")
+        m2.metric("최근 6개월 누적 수익률", f"{ret_6m:+.2f}%")
+        m3.metric("최근 1년 누적 수익률", f"{ret_1y:+.2f}%")
+        
+        st.markdown("---")
+        st.markdown("#### 📅 월별 수익률 히스토리")
+        
+        # 월별 수익률 집계
+        daily_df = pd.DataFrame({'value': daily_norm})
+        monthly_resample = daily_df.resample('M').last()
+        monthly_rets = monthly_resample.pct_change().dropna() * 100
+        
+        month_rows = []
+        for dt, row in monthly_rets.iterrows():
+            m_str = dt.strftime("%Y년 %m월")
+            val = row['value']
+            month_rows.append({
+                "기준 월": m_str,
+                "월간 수익률": f"{val:+.2f}%",
+                "상태": "▲ 상승" if val > 0 else ("▼ 하락" if val < 0 else "- 보합")
+            })
+        
+        st.dataframe(pd.DataFrame(month_rows).iloc[::-1], hide_index=True, use_container_width=True)
+        
+        # 1년 자산 추이 차트
+        st.markdown("#### 📈 최근 1년 자산 가치 성장 추이 (기준지수 100)")
+        fig_rep = px.line(daily_df, x=daily_df.index, y='value', labels={'value': '자산 지수 (시작=1.0)', 'index': '날짜'})
+        fig_rep.update_traces(line_color="#1E3A8A", hovertemplate="%{x|%Y-%m-%d}: 지수 %{y:.3f}")
+        fig_rep.update_layout(height=280, margin=dict(l=5, r=5, t=10, b=5))
+        st.plotly_chart(fig_rep, use_container_width=True)
+    else:
+        st.warning("충분한 과거 데이터가 확보되지 않았습니다.")
+
+# -------------------------------------------------------------
+# 6. 사이드바 - 자본 설정
 # -------------------------------------------------------------
 st.sidebar.title("🏢 투자 자본 설정")
 inv_capital_man = st.sidebar.number_input("총 투자 자본금 (만원 단위)", min_value=1000, value=50000, step=5000)
 total_capital = inv_capital_man * 10000
 
 # -------------------------------------------------------------
-# 6. 메인 헤더 & 월 선택 컨트롤러
+# 7. 메인 헤더 & 월 선택 컨트롤러
 # -------------------------------------------------------------
 st.title("SignalC 법인 포트폴리오")
 st.caption("4대 표준 포트폴리오 월별 성과 추이 및 맞춤 진단 시뮬레이터")
@@ -157,7 +226,6 @@ else:
 
 curr_year, curr_month = latest_dt.year, latest_dt.month
 
-# 2026년 1월부터 현재 월까지 옵션 리스트 자동 생성
 month_options = []
 start_yr, start_mo = 2026, 1
 
@@ -168,12 +236,11 @@ for y in range(start_yr, curr_year + 1):
         month_options.append(f"{y}년 {m:02d}월")
 
 # -------------------------------------------------------------
-# TAB 1: 기본 포트폴리오 (2x2 그리드)
+# TAB 1: 기본 포트폴리오 (2x2 그리드 & BEST 뱃지 & 리포트)
 # -------------------------------------------------------------
 with main_tab1:
     col_title, col_sel = st.columns([3, 1])
     with col_sel:
-        # 기본 디폴트는 가장 최신월 (리스트 마지막 요소)
         selected_month_str = st.selectbox(
             "조회 월 선택",
             options=month_options,
@@ -181,20 +248,65 @@ with main_tab1:
             label_visibility="collapsed"
         )
     
-    # 선택된 년/월 파싱
     sel_year = int(selected_month_str.split("년")[0])
     sel_month = int(selected_month_str.split("년")[1].replace("월", "").strip())
     
     with col_title:
         st.subheader(f"📊 {sel_year}년 {sel_month:02d}월 포트폴리오 성과 추이")
 
-    # 선택된 월의 1일 및 말일 설정
     _, last_day_num = calendar.monthrange(sel_year, sel_month)
     target_start_of_month = datetime(sel_year, sel_month, 1)
     target_end_of_month = datetime(sel_year, sel_month, last_day_num)
     target_prev_month_end = target_start_of_month - pd.Timedelta(days=1)
 
-    # 2x2 그리드 컬럼 배치
+    # 1. 4개 모델 당월 수익률 사전 계산 (BEST 1위 식별용)
+    perf_records = {}
+    calculated_data = {}
+
+    for p_name, p_info in STANDARD_PORTFOLIOS.items():
+        valid_tickers = [t for t in p_info["weights"] if t in prices and len(prices[t]) > 0]
+        if len(valid_tickers) == len(p_info["weights"]):
+            all_month_dates = []
+            for t in valid_tickers:
+                s_m = prices[t][(prices[t].index >= target_prev_month_end) & (prices[t].index <= target_end_of_month)]
+                if not s_m.empty:
+                    all_month_dates.extend(s_m.index)
+            month_dates = sorted(list(set(all_month_dates)))
+            
+            if len(month_dates) > 0:
+                p_values = pd.Series(0.0, index=month_dates)
+                item_series_dict = {}
+                item_changes = {}
+
+                for t, w in p_info["weights"].items():
+                    s = prices[t]
+                    prev_close = s[s.index <= target_start_of_month]
+                    prev_val = float(prev_close.iloc[-1]) if not prev_close.empty else float(s.iloc[0])
+                    
+                    s_in_m = s[(s.index >= target_start_of_month) & (s.index <= target_end_of_month)]
+                    curr_val = float(s_in_month.iloc[-1]) if not s_in_m.empty else prev_val
+                    
+                    chg_pct = ((curr_val - prev_val) / prev_val) * 100 if prev_val != 0 else 0.0
+                    item_changes[t] = chg_pct
+
+                    s_aligned = s.reindex(month_dates).ffill().bfill()
+                    base_val = s_aligned.iloc[0] if s_aligned.iloc[0] != 0 else 1.0
+                    norm_single = (s_aligned / base_val - 1.0) * 100
+                    item_series_dict[t] = norm_single
+                    p_values += (norm_single * (w / 100))
+
+                final_pct = p_values.iloc[-1]
+                perf_records[p_name] = final_pct
+                calculated_data[p_name] = {
+                    "p_values": p_values,
+                    "item_series_dict": item_series_dict,
+                    "item_changes": item_changes,
+                    "final_pct": final_pct
+                }
+
+    best_portfolio = max(perf_records, key=perf_records.get) if perf_records else None
+
+    # 2. 2x2 그리드 카드 렌더링
     grid_row1_col1, grid_row1_col2 = st.columns(2)
     grid_row2_col1, grid_row2_col2 = st.columns(2)
     grid_cells = [grid_row1_col1, grid_row1_col2, grid_row2_col1, grid_row2_col2]
@@ -203,149 +315,115 @@ with main_tab1:
         cell = grid_cells[idx]
         with cell:
             with st.container(border=True):
-                valid_tickers = [t for t in p_info["weights"] if t in prices and len(prices[t]) > 0]
-                
-                if len(valid_tickers) == len(p_info["weights"]):
-                    # 선택된 월 데이터 날짜 인덱스 추출 (전월말 기준일 포함)
-                    all_month_dates = []
-                    for t in valid_tickers:
-                        s_m = prices[t][(prices[t].index >= target_prev_month_end) & (prices[t].index <= target_end_of_month)]
-                        if not s_m.empty:
-                            all_month_dates.extend(s_m.index)
-                    
-                    month_dates = sorted(list(set(all_month_dates)))
-                    
-                    if len(month_dates) > 0:
-                        portfolio_values = pd.Series(0.0, index=month_dates)
-                        item_series_dict = {}
-                        item_changes = {}
+                if p_name in calculated_data:
+                    cdata = calculated_data[p_name]
+                    current_perf_pct = cdata["final_pct"]
+                    current_perf_krw = total_capital * (current_perf_pct / 100)
 
-                        for t, w in p_info["weights"].items():
-                            s = prices[t]
-                            
-                            # 전월말 기준가 찾기 (없으면 당월 첫 데이터 기준)
-                            prev_close = s[s.index <= target_start_of_month]
-                            if not prev_close.empty:
-                                prev_val = float(prev_close.iloc[-1])
-                            else:
-                                s_in_m = s[s.index >= target_start_of_month]
-                                prev_val = float(s_in_m.iloc[0]) if not s_in_m.empty else float(s.iloc[0])
-                            
-                            # 해당 월 내의 종가들
-                            s_in_month = s[(s.index >= target_start_of_month) & (s.index <= target_end_of_month)]
-                            curr_val = float(s_in_month.iloc[-1]) if not s_in_month.empty else prev_val
-                            
-                            chg_pct = ((curr_val - prev_val) / prev_val) * 100 if prev_val != 0 else 0.0
-                            item_changes[t] = chg_pct
+                    if current_perf_pct > 0:
+                        symbol = "▲"
+                        color_style = "color:#DC2626;"
+                    elif current_perf_pct < 0:
+                        symbol = "▼"
+                        color_style = "color:#2563EB;"
+                    else:
+                        symbol = "-"
+                        color_style = "color:#4B5563;"
 
-                            # 시계열 등락률(%)
-                            s_aligned = s.reindex(month_dates).ffill().bfill()
-                            base_val = s_aligned.iloc[0] if s_aligned.iloc[0] != 0 else 1.0
-                            norm_single = (s_aligned / base_val - 1.0) * 100
-                            item_series_dict[t] = norm_single
-                            
-                            # 가중합산
-                            portfolio_values += (norm_single * (w / 100))
-
-                        current_perf_pct = portfolio_values.iloc[-1]
-                        current_perf_krw = total_capital * (current_perf_pct / 100)
-
-                        if current_perf_pct > 0:
-                            symbol = "▲"
-                            color_style = "color:#DC2626;"
-                        elif current_perf_pct < 0:
-                            symbol = "▼"
-                            color_style = "color:#2563EB;"
+                    # 헤더: 뱃지 및 리포트 팝업 버튼 배치
+                    h_col1, h_col2 = st.columns([3, 2])
+                    with h_col1:
+                        if p_name == best_portfolio and current_perf_pct > 0:
+                            st.markdown(f"<div style='display:flex; align-items:center; gap:6px;'>"
+                                        f"<h3 style='margin:0;'>{p_name}</h3>"
+                                        f"<span style='background-color:#FEF3C7; color:#B45309; font-size:11px; font-weight:bold; padding:2px 8px; border-radius:12px; border:1px solid #FDE68A;'>🏆 BEST 1위</span>"
+                                        f"</div>", unsafe_allow_html=True)
                         else:
-                            symbol = "-"
-                            color_style = "color:#4B5563;"
+                            st.markdown(f"<h3 style='margin:0;'>{p_name}</h3>", unsafe_allow_html=True)
+                        st.caption(f"목표 배당률: {p_info['target_yield_range']}")
 
-                        # 카드 상단 헤더
-                        st.markdown(f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                                    f"<h3 style='margin:0;'>{p_name}</h3>"
-                                    f"<span style='font-size:13px; color:gray;'>목표: {p_info['target_yield_range']}</span>"
-                                    f"</div>", unsafe_allow_html=True)
-                        
-                        st.markdown(f"""
-                        <div style='margin: 8px 0;'>
-                            <span style='font-size:13px; color:#555;'>전월 대비 수익률:</span> 
-                            <strong style='font-size:19px; {color_style}'>{symbol} {current_perf_pct:+.2f}%</strong>
-                            <span style='font-size:13px; margin-left:6px; {color_style}'>({current_perf_krw/10000:+,.0f} 만원)</span>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    with h_col2:
+                        # 리포트 팝업 트리거 버튼
+                        if st.button(f"📊 {p_name} 리포트", key=f"btn_rep_{p_name}", use_container_width=True):
+                            show_portfolio_report(p_name, p_info, prices)
 
-                        # 다중 라인 차트 생성
-                        fig = go.Figure()
-                        fig.add_hline(y=0, line_dash="dot", line_color="#D1D5DB", line_width=1)
+                    # 수익률 메트릭
+                    st.markdown(f"""
+                    <div style='margin: 6px 0;'>
+                        <span style='font-size:13px; color:#555;'>전월 대비 수익률:</span> 
+                        <strong style='font-size:19px; {color_style}'>{symbol} {current_perf_pct:+.2f}%</strong>
+                        <span style='font-size:13px; margin-left:6px; {color_style}'>({current_perf_krw/10000:+,.0f} 만원)</span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                        # 개별 종목 라인
-                        for t, s_data in item_series_dict.items():
-                            t_color = TICKER_COLORS.get(t, "#9CA3AF")
-                            fig.add_trace(go.Scatter(
-                                x=s_data.index,
-                                y=s_data,
-                                mode='lines',
-                                name=f"{t} ({p_info['weights'][t]}%)",
-                                line=dict(color=t_color, width=1.5),
-                                opacity=0.85,
-                                hovertemplate=f'<b>{t}</b>: %{{y:+.2f}}%<extra></extra>'
-                            ))
+                    # 다중 라인 차트
+                    fig = go.Figure()
+                    fig.add_hline(y=0, line_dash="dot", line_color="#D1D5DB", line_width=1)
 
-                        # 포트폴리오 총합선
+                    for t, s_data in cdata["item_series_dict"].items():
+                        t_color = TICKER_COLORS.get(t, "#9CA3AF")
                         fig.add_trace(go.Scatter(
-                            x=portfolio_values.index,
-                            y=portfolio_values,
-                            mode='lines+markers',
-                            name='포트폴리오 합계',
-                            line=dict(color='#1E293B', width=3.0),
-                            marker=dict(size=4),
-                            hovertemplate='<b>포트폴리오 합계</b>: %{y:+.2f}%<extra></extra>'
+                            x=s_data.index,
+                            y=s_data,
+                            mode='lines',
+                            name=f"{t} ({p_info['weights'][t]}%)",
+                            line=dict(color=t_color, width=1.5),
+                            opacity=0.85,
+                            hovertemplate=f'<b>{t}</b>: %{{y:+.2f}}%<extra></extra>'
                         ))
 
-                        fig.update_layout(
-                            height=250,
-                            margin=dict(l=5, r=5, t=10, b=5),
-                            xaxis=dict(
-                                range=[target_start_of_month, target_end_of_month],
-                                tickformat="%d일",
-                                dtick=86400000.0 * 5,
-                                showgrid=True,
-                                gridcolor="#F3F4F6"
-                            ),
-                            yaxis=dict(
-                                tickformat="+.1f%",
-                                showgrid=True,
-                                gridcolor="#F3F4F6"
-                            ),
-                            legend=dict(
-                                orientation="h",
-                                yanchor="bottom",
-                                y=1.02,
-                                xanchor="right",
-                                x=1,
-                                font=dict(size=10)
-                            ),
-                            plot_bgcolor='white',
-                            paper_bgcolor='white',
-                            hovermode="x unified"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                    fig.add_trace(go.Scatter(
+                        x=cdata["p_values"].index,
+                        y=cdata["p_values"],
+                        mode='lines+markers',
+                        name='포트폴리오 합계',
+                        line=dict(color='#1E293B', width=3.0),
+                        marker=dict(size=4),
+                        hovertemplate='<b>포트폴리오 합계</b>: %{y:+.2f}%<extra></extra>'
+                    ))
 
-                        # 하단 개별 종목 등락 배지
-                        badge_htmls = []
-                        for t, chg in item_changes.items():
-                            sym = "▲" if chg > 0 else ("▼" if chg < 0 else "-")
-                            bg = "#FEE2E2" if chg > 0 else ("#DBEAFE" if chg < 0 else "#F3F4F6")
-                            tc = "#991B1B" if chg > 0 else ("#1E40AF" if chg < 0 else "#374151")
-                            badge_htmls.append(
-                                f"<span style='background-color:{bg}; color:{tc}; font-size:11px; padding:3px 6px; border-radius:4px; margin-right:4px; font-weight:600;'>"
-                                f"{t} ({p_info['weights'][t]}%) {sym}{chg:+.1f}%</span>"
-                            )
-                        st.markdown("<div style='margin-top:2px; line-height:1.9;'>" + "".join(badge_htmls) + "</div>", unsafe_allow_html=True)
-                    else:
-                        st.info(f"{sel_year}년 {sel_month:02d}월 데이터를 집계 중입니다.")
+                    fig.update_layout(
+                        height=240,
+                        margin=dict(l=5, r=5, t=10, b=5),
+                        xaxis=dict(
+                            range=[target_start_of_month, target_end_of_month],
+                            tickformat="%d일",
+                            dtick=86400000.0 * 5,
+                            showgrid=True,
+                            gridcolor="#F3F4F6"
+                        ),
+                        yaxis=dict(
+                            tickformat="+.1f%",
+                            showgrid=True,
+                            gridcolor="#F3F4F6"
+                        ),
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1,
+                            font=dict(size=10)
+                        ),
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        hovermode="x unified"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # 하단 개별 종목 등락 배지
+                    badge_htmls = []
+                    for t, chg in cdata["item_changes"].items():
+                        sym = "▲" if chg > 0 else ("▼" if chg < 0 else "-")
+                        bg = "#FEE2E2" if chg > 0 else ("#DBEAFE" if chg < 0 else "#F3F4F6")
+                        tc = "#991B1B" if chg > 0 else ("#1E40AF" if chg < 0 else "#374151")
+                        badge_htmls.append(
+                            f"<span style='background-color:{bg}; color:{tc}; font-size:11px; padding:3px 6px; border-radius:4px; margin-right:4px; font-weight:600;'>"
+                            f"{t} ({p_info['weights'][t]}%) {sym}{chg:+.1f}%</span>"
+                        )
+                    st.markdown("<div style='margin-top:2px; line-height:1.9;'>" + "".join(badge_htmls) + "</div>", unsafe_allow_html=True)
                 else:
-                    st.info("실시간 시세 데이터를 연동 중입니다.")
+                    st.info("데이터를 집계 중입니다.")
 
     st.markdown("---")
     st.subheader("📋 포트폴리오 편입 상품 종합 정보")
